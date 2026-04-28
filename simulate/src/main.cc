@@ -12,11 +12,14 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// !!! hack code: make glfw_adapter.window_ public
+// !!! hack code: make glfw_adapter.window_ public; OnKey is protected on base
 #define private public
+#define protected public
 #include "glfw_adapter.h"
+#undef protected
 #undef private
 
+#include <algorithm>
 #include <chrono>
 #include <cstdint>
 #include <cstdio>
@@ -37,6 +40,9 @@
 
 #define MUJOCO_PLUGIN_DIR "mujoco_plugin"
 #define NUM_MOTOR_IDL_GO 20
+
+// Set in main; used for keyframe shortcuts (L / [ ]).
+static mujoco::Simulate *g_keyboard_sim = nullptr;
 
 extern "C"
 {
@@ -324,6 +330,99 @@ namespace
     return mnew;
   }
 
+  // Resolve MJCF keyframe for initial pose (same idea as mujoco_ros / simulate "Load key").
+  int ResolveInitialKeyframeId(const mjModel *model)
+  {
+    if (!model || model->nkey < 1)
+    {
+      return -1;
+    }
+    if (!param::config.initial_keyframe_name.empty())
+    {
+      const int id =
+          mj_name2id(model, mjOBJ_KEY, param::config.initial_keyframe_name.c_str());
+      if (id >= 0)
+      {
+        return id;
+      }
+      std::cerr << "[WARN] initial_keyframe_name \"" << param::config.initial_keyframe_name
+                << "\" not found; using initial_keyframe_index instead.\n";
+    }
+    if (param::config.initial_keyframe_index < 0)
+    {
+      return -1;
+    }
+    return std::min(param::config.initial_keyframe_index,
+                    static_cast<int>(model->nkey) - 1);
+  }
+
+  // Apply keyframe to mjData before sim->Load so LoadOnRenderThread copies correct qpos.
+  int ApplyConfigKeyframeBeforeLoad(mjModel *model, mjData *data)
+  {
+    const int kid = ResolveInitialKeyframeId(model);
+    if (kid < 0)
+    {
+      return -1;
+    }
+    mj_resetDataKeyframe(model, data, kid);
+    mj_forward(model, data);
+    const char *kname =
+        (model->name_keyadr && kid < model->nkey) ? model->names + model->name_keyadr[kid] : "";
+    std::cout << "[INFO] Initial keyframe " << kid << (kname[0] ? " (" : "")
+              << (kname[0] ? kname : "") << (kname[0] ? ")" : "") << "\n";
+    return kid;
+  }
+
+  void SyncSimKeyframeIndexAfterLoad(mj::Simulate *sim, int key_id)
+  {
+    if (!sim || key_id < 0)
+    {
+      return;
+    }
+    const std::lock_guard<std::recursive_mutex> lock(sim->mtx);
+    sim->key = key_id;
+  }
+
+  void RequestLoadKeyframeFromUi(mj::Simulate *sim)
+  {
+    if (!sim)
+    {
+      return;
+    }
+    const std::lock_guard<std::recursive_mutex> lock(sim->mtx);
+    if (!sim->m_ || sim->m_->nkey < 1)
+    {
+      return;
+    }
+    if (sim->key < 0 || sim->key >= sim->m_->nkey)
+    {
+      sim->key = 0;
+    }
+    sim->pending_.load_key = true;
+  }
+
+  void StepKeyframeAndRequestLoad(mj::Simulate *sim, int delta)
+  {
+    if (!sim)
+    {
+      return;
+    }
+    const std::lock_guard<std::recursive_mutex> lock(sim->mtx);
+    if (!sim->m_ || sim->m_->nkey < 1)
+    {
+      return;
+    }
+    int k = sim->key;
+    if (k < 0)
+    {
+      k = 0;
+    }
+    const int hi = static_cast<int>(sim->m_->nkey) - 1;
+    k = std::clamp(k + delta, 0, hi);
+    sim->key = k;
+    sim->pending_.load_key = true;
+  }
+
   // simulate in background thread (while rendering in main thread)
   void PhysicsLoop(mj::Simulate &sim)
   {
@@ -348,7 +447,9 @@ namespace
           dnew = mj_makeData(mnew);
         if (dnew)
         {
+          const int key_id = ApplyConfigKeyframeBeforeLoad(mnew, dnew);
           sim.Load(mnew, dnew, sim.dropfilename);
+          SyncSimKeyframeIndexAfterLoad(&sim, key_id);
 
           mj_deleteData(d);
           mj_deleteModel(m);
@@ -378,7 +479,9 @@ namespace
           dnew = mj_makeData(mnew);
         if (dnew)
         {
+          const int key_id = ApplyConfigKeyframeBeforeLoad(mnew, dnew);
           sim.Load(mnew, dnew, sim.filename);
+          SyncSimKeyframeIndexAfterLoad(&sim, key_id);
 
           mj_deleteData(d);
           mj_deleteModel(m);
@@ -547,7 +650,9 @@ void PhysicsThread(mj::Simulate *sim, const char *filename)
       d = mj_makeData(m);
     if (d)
     {
+      const int key_id = ApplyConfigKeyframeBeforeLoad(m, d);
       sim->Load(m, d, filename);
+      SyncSimKeyframeIndexAfterLoad(sim, key_id);
       mj_forward(m, d);
 
       // allocate ctrlnoise
@@ -635,6 +740,19 @@ void user_key_cb(GLFWwindow* window, int key, int scancode, int act, int mods) {
       mj_resetData(m, d);
       mj_forward(m, d);
     }
+    if (key == GLFW_KEY_L) {
+      RequestLoadKeyframeFromUi(g_keyboard_sim);
+    } else if (key == GLFW_KEY_LEFT_BRACKET) {
+      StepKeyframeAndRequestLoad(g_keyboard_sim, -1);
+    } else if (key == GLFW_KEY_RIGHT_BRACKET) {
+      StepKeyframeAndRequestLoad(g_keyboard_sim, +1);
+    }
+  }
+  // glfwSetKeyCallback replaces GlfwAdapter's handler; forward so Space toggles Pause/Run
+  // and other MuJoCo shortcuts keep working (requires GLFWwindow user pointer = GlfwAdapter).
+  auto* adapter = static_cast<mj::GlfwAdapter*>(glfwGetWindowUserPointer(window));
+  if (adapter) {
+    adapter->OnKey(key, scancode, act);
   }
 }
 
@@ -682,13 +800,18 @@ int main(int argc, char **argv)
   auto sim = std::make_unique<mj::Simulate>(
     std::make_unique<mj::GlfwAdapter>(),
     &cam, &opt, &pert, /* is_passive = */ false);
+  // Default viewer starts running; keep paused until Space toggles Run
+  sim->run = 0;
+  g_keyboard_sim = sim.get();
 
   std::thread unitree_thread(UnitreeSdk2BridgeThread, nullptr);
 
   // start physics thread
   std::thread physicsthreadhandle(&PhysicsThread, sim.get(), param::config.robot_scene.c_str());
   // start simulation UI loop (blocking call)
-  glfwSetKeyCallback(static_cast<mj::GlfwAdapter*>(sim->platform_ui.get())->window_,user_key_cb);
+  GLFWwindow* const mj_window =
+      static_cast<mj::GlfwAdapter*>(sim->platform_ui.get())->window_;
+  glfwSetKeyCallback(mj_window, user_key_cb);
   sim->RenderLoop();
   physicsthreadhandle.join();
 

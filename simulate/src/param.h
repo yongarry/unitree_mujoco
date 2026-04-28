@@ -26,6 +26,10 @@ inline struct SimulationConfig
     int enable_elastic_band;
     int band_attached_link = 0;
 
+    // MJCF <keyframe>: apply on each model load (-1 = off). Name overrides index when set.
+    int initial_keyframe_index = 0;
+    std::string initial_keyframe_name;
+
     void load_from_yaml(const std::string &filename)
     {
         auto cfg = YAML::LoadFile(filename);
@@ -41,6 +45,12 @@ inline struct SimulationConfig
             joystick_bits = cfg["joystick_bits"].as<int>();
             print_scene_information = cfg["print_scene_information"].as<int>();
             enable_elastic_band = cfg["enable_elastic_band"].as<int>();
+            if (cfg["initial_keyframe_index"]) {
+                initial_keyframe_index = cfg["initial_keyframe_index"].as<int>();
+            }
+            if (cfg["initial_keyframe_name"]) {
+                initial_keyframe_name = cfg["initial_keyframe_name"].as<std::string>();
+            }
         }
         catch(const std::exception& e)
         {
