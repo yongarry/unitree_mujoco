@@ -229,6 +229,25 @@
               group="1" density="0" rgba="0.7 0.7 0.7 1" mesh="waist_support_link" />
             <geom pos="0.0039635 0 -0.054" quat="1 0 0 0" type="mesh" rgba="0.7 0.7 0.7 1"
               mesh="waist_support_link" />
+            <!-- Head (fixed; frame = g1_29dof.urdf head_joint origin in torso_link.
+                 The head mesh geoms above stay merged into torso_link, unchanged). -->
+            <body name="head_link" pos="0.0039635 0 -0.054">
+              <!-- Intel RealSense D435i inside the head. The head_link-relative
+                   pose composes to the official d435_joint transform (torso frame:
+                   xyz="0.0576235 0.01753 0.41987" rpy="0 0.8307767239 0", pitched
+                   down ~47.6 deg). NOTE: rev_1_0 hardware mounts it 1 cm higher
+                   (torso-frame z=0.42987) - correct via vision.camera.extrinsic.
+                   The body frame follows the RealSense camera_link convention
+                   (x forward, z up); the <camera> maps it to the MuJoCo camera
+                   convention (-z forward). -->
+              <body name="d435_link" pos="0.05366 0.01753 0.47387"
+                quat="0.91495967 0 0.40354530 0">
+                <site name="d435i" size="0.005" rgba="1 0 0 0.5"/>
+                <geom name="d435i_housing" type="box" size="0.0125 0.045 0.0125"
+                  contype="0" conaffinity="0" group="1" density="0" rgba="0.15 0.15 0.15 1"/>
+                <camera name="d435i" fovy="55.2" xyaxes="0 -1 0 0 0 1"/>
+              </body>
+            </body>
             <body name="left_shoulder_pitch_link" pos="0.0039563 0.10022 0.23778"
               quat="0.990264 0.139201 1.38722e-05 -9.86868e-05">
               <inertial pos="0 0.035892 -0.011628" quat="0.654152 0.0130458 -0.326267 0.68225"
